@@ -57,6 +57,7 @@
 #include <windows.h>
 
 #include <google/protobuf/stubs/io_win32.h>
+#include <google/protobuf/stubs/scoped_ptr.h>
 
 #include <cassert>
 #include <memory>
@@ -71,7 +72,6 @@ namespace win32 {
 namespace {
 
 using std::string;
-using std::unique_ptr;
 using std::wstring;
 
 template <typename char_type>
@@ -105,15 +105,15 @@ bool has_longpath_prefix(const char_type* path) {
          path[3] == '\\';
 }
 
+template <typename char_type>
+bool is_separator(char_type c) {
+  return c == '/' || c == '\\';
+}
+
 // Returns true if the path starts with a drive specifier (e.g. "c:\").
 template <typename char_type>
 bool is_path_absolute(const char_type* path) {
   return has_drive_letter(path) && is_separator(path[2]);
-}
-
-template <typename char_type>
-bool is_separator(char_type c) {
-  return c == '/' || c == '\\';
 }
 
 template <typename char_type>
@@ -139,11 +139,11 @@ string join_paths(const string& path1, const string& path2) {
     return path1;
   }
 
-  if (is_separator(path1.back())) {
-    return is_separator(path2.front()) ? (path1 + path2.substr(1))
+  if (is_separator(path1[path1.size() - 1])) {
+    return is_separator(path2[0]) ? (path1 + path2.substr(1))
                                        : (path1 + path2);
   } else {
-    return is_separator(path2.front()) ? (path1 + path2)
+    return is_separator(path2[0]) ? (path1 + path2)
                                        : (path1 + '\\' + path2);
   }
 }
@@ -155,12 +155,13 @@ string normalize(string path) {
 
   static const string dot(".");
   static const string dotdot("..");
+  const char *p = path.c_str();
 
   std::vector<string> segments;
   int segment_start = -1;
   // Find the path segments in `path` (separated by "/").
   for (int i = 0;; ++i) {
-    if (!is_separator(path[i]) && path[i] != '\0') {
+    if (!is_separator(p[i]) && p[i] != '\0') {
       // The current character does not end a segment, so start one unless it's
       // already started.
       if (segment_start < 0) {
@@ -169,7 +170,7 @@ string normalize(string path) {
     } else if (segment_start >= 0 && i > segment_start) {
       // The current character is "/" or "\0", so this ends a segment.
       // Add that to `segments` if there's anything to add; handle "." and "..".
-      string segment(path, segment_start, i - segment_start);
+      string segment(p, segment_start, i - segment_start);
       segment_start = -1;
       if (segment == dotdot) {
         if (!segments.empty() &&
@@ -180,7 +181,7 @@ string normalize(string path) {
         segments.push_back(segment);
       }
     }
-    if (path[i] == '\0') {
+    if (p[i] == '\0') {
       break;
     }
   }
@@ -195,32 +196,32 @@ string normalize(string path) {
   // Join all segments.
   bool first = true;
   std::ostringstream result;
-  for (const auto& s : segments) {
+  for (int i = 0; i < segments.size(); ++i) {
     if (!first) {
       result << '\\';
     }
     first = false;
-    result << s;
+    result << segments[i];
   }
   // Preserve trailing separator if the input contained it.
-  if (is_separator(path.back())) {
+  if (!path.empty() && is_separator(p[path.size() - 1])) {
     result << '\\';
   }
   return result.str();
 }
 
-std::unique_ptr<WCHAR[]> as_wstring(const string& s) {
+WCHAR* as_wstring(const string& s) {
   int len = ::MultiByteToWideChar(CP_UTF8, 0, s.c_str(), s.size(), NULL, 0);
-  std::unique_ptr<WCHAR[]> result(new WCHAR[len + 1]);
-  ::MultiByteToWideChar(CP_UTF8, 0, s.c_str(), s.size(), result.get(), len + 1);
-  result.get()[len] = 0;
-  return std::move(result);
+  WCHAR* result = new WCHAR[len + 1];
+  ::MultiByteToWideChar(CP_UTF8, 0, s.c_str(), s.size(), result, len + 1);
+  result[len] = 0;
+  return result;
 }
 
-wstring as_wchar_path(const string& path) {
-  std::unique_ptr<WCHAR[]> wbuf(as_wstring(path));
+void as_wchar_path(const string& path, wstring* wchar_path) {
+  scoped_array<WCHAR> wbuf(as_wstring(path));
   replace_directory_separators(wbuf.get());
-  return wstring(wbuf.get());
+  wchar_path->assign(wbuf.get());
 }
 
 bool as_windows_path(const string& path, wstring* result) {
@@ -239,7 +240,7 @@ bool as_windows_path(const string& path, wstring* result) {
     ::GetCurrentDirectoryA(MAX_PATH, cwd);
     mutable_path = join_paths(cwd, mutable_path);
   }
-  *result = as_wchar_path(normalize(mutable_path));
+  as_wchar_path(normalize(mutable_path), result);
   if (!has_longpath_prefix(result->c_str())) {
     // Add the "\\?\" prefix unconditionally. This way we prevent the Win32 API
     // from processing the path and "helpfully" removing trailing dots from the
@@ -324,7 +325,7 @@ FILE* fopen(const char* path, const char* mode) {
     errno = ENOENT;
     return NULL;
   }
-  std::unique_ptr<WCHAR[]> wmode(as_wstring(mode));
+  scoped_array<WCHAR> wmode(as_wstring(mode));
   return ::_wfopen(wpath.c_str(), wmode.get());
 #else
   return ::fopen(path, mode);

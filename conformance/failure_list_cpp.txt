@@ -12,6 +12,8 @@ Recommended.FieldMaskPathsDontRoundTrip.JsonOutput
 Recommended.FieldMaskTooManyUnderscore.JsonOutput
 Recommended.Proto3.JsonInput.BoolFieldDoubleQuotedFalse
 Recommended.Proto3.JsonInput.BoolFieldDoubleQuotedTrue
+Recommended.Proto3.JsonInput.BytesFieldBase64Url.JsonOutput
+Recommended.Proto3.JsonInput.BytesFieldBase64Url.ProtobufOutput
 Recommended.Proto3.JsonInput.FieldMaskInvalidCharacter
 Recommended.Proto3.JsonInput.FieldNameDuplicate
 Recommended.Proto3.JsonInput.FieldNameDuplicateDifferentCasing1
@@ -52,4 +54,3 @@ Required.Proto2.ProtobufInput.PrematureEofInPackedField.SINT32
 Required.Proto2.ProtobufInput.PrematureEofInPackedField.SINT64
 Required.Proto2.ProtobufInput.PrematureEofInPackedField.UINT32
 Required.Proto2.ProtobufInput.PrematureEofInPackedField.UINT64
-

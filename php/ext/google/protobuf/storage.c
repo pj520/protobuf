@@ -275,9 +275,6 @@ void native_slot_init(upb_fieldtype_t type, void* memory, CACHED_VALUE* cache) {
       break;
     case UPB_TYPE_STRING:
     case UPB_TYPE_BYTES:
-      DEREF(memory, CACHED_VALUE*) = cache;
-      ZVAL_EMPTY_STRING(CACHED_PTR_TO_ZVAL_PTR(cache));
-      break;
     case UPB_TYPE_MESSAGE:
       DEREF(memory, CACHED_VALUE*) = cache;
       break;
@@ -563,11 +560,6 @@ static size_t align_up_to(size_t offset, size_t granularity) {
   return (offset + granularity - 1) & ~(granularity - 1);
 }
 
-static void* slot_memory(MessageLayout* layout, const void* storage,
-                         const upb_fielddef* field) {
-  return ((uint8_t*)storage) + layout->fields[upb_fielddef_index(field)].offset;
-}
-
 static uint32_t* slot_oneof_case(MessageLayout* layout, const void* storage,
                                  const upb_fielddef* field) {
   return (uint32_t*)(((uint8_t*)storage) +
@@ -579,6 +571,11 @@ static int slot_property_cache(MessageLayout* layout, const void* storage,
   return layout->fields[upb_fielddef_index(field)].cache_index;
 }
 
+void* slot_memory(MessageLayout* layout, const void* storage,
+                         const upb_fielddef* field) {
+  return ((uint8_t*)storage) + layout->fields[upb_fielddef_index(field)].offset;
+}
+
 MessageLayout* create_layout(const upb_msgdef* msgdef) {
   MessageLayout* layout = ALLOC(MessageLayout);
   int nfields = upb_msgdef_numfields(msgdef);
@@ -587,6 +584,11 @@ MessageLayout* create_layout(const upb_msgdef* msgdef) {
   size_t off = 0;
   int i = 0;
 
+  // Reserve space for unknown fields.
+  off += sizeof(void*);
+
+  TSRMLS_FETCH();
+  Descriptor* desc = UNBOX_HASHTABLE_VALUE(Descriptor, get_def_obj(msgdef));
   layout->fields = ALLOC_N(MessageField, nfields);
 
   for (upb_msg_field_begin(&it, msgdef); !upb_msg_field_done(&it);
@@ -612,7 +614,37 @@ MessageLayout* create_layout(const upb_msgdef* msgdef) {
     layout->fields[upb_fielddef_index(field)].offset = off;
     layout->fields[upb_fielddef_index(field)].case_offset =
         MESSAGE_FIELD_NO_CASE;
-    layout->fields[upb_fielddef_index(field)].cache_index = i++;
+
+    const char* fieldname = upb_fielddef_name(field);
+
+#if PHP_MAJOR_VERSION < 7 || (PHP_MAJOR_VERSION == 7 && PHP_MINOR_VERSION == 0)
+    zend_class_entry* old_scope = EG(scope);
+    EG(scope) = desc->klass;
+#else
+    zend_class_entry* old_scope = EG(fake_scope);
+    EG(fake_scope) = desc->klass;
+#endif
+
+#if PHP_MAJOR_VERSION < 7
+    zval member;
+    ZVAL_STRINGL(&member, fieldname, strlen(fieldname), 0);
+    zend_property_info* property_info =
+        zend_get_property_info(desc->klass, &member, true TSRMLS_CC);
+#else
+    zend_string* member = zend_string_init(fieldname, strlen(fieldname), 1);
+    zend_property_info* property_info =
+        zend_get_property_info(desc->klass, member, true);
+    zend_string_release(member);
+#endif
+
+#if PHP_MAJOR_VERSION < 7 || (PHP_MAJOR_VERSION == 7 && PHP_MINOR_VERSION == 0)
+    EG(scope) = old_scope;
+#else
+    EG(fake_scope) = old_scope;
+#endif
+
+    layout->fields[upb_fielddef_index(field)].cache_index =
+        property_info->offset;
     off += field_size;
   }
 
@@ -640,11 +672,40 @@ MessageLayout* create_layout(const upb_msgdef* msgdef) {
     // Align the offset .
     off = align_up_to( off, field_size);
     // Assign all fields in the oneof this same offset.
+    const char* oneofname = upb_oneofdef_name(oneof);
     for (upb_oneof_begin(&fit, oneof); !upb_oneof_done(&fit);
          upb_oneof_next(&fit)) {
       const upb_fielddef* field = upb_oneof_iter_field(&fit);
       layout->fields[upb_fielddef_index(field)].offset = off;
-      layout->fields[upb_fielddef_index(field)].cache_index = i;
+
+#if PHP_MAJOR_VERSION < 7 || (PHP_MAJOR_VERSION == 7 && PHP_MINOR_VERSION == 0)
+      zend_class_entry* old_scope = EG(scope);
+      EG(scope) = desc->klass;
+#else
+      zend_class_entry* old_scope = EG(fake_scope);
+      EG(fake_scope) = desc->klass;
+#endif
+
+#if PHP_MAJOR_VERSION < 7
+      zval member;
+      ZVAL_STRINGL(&member, oneofname, strlen(oneofname), 0);
+      zend_property_info* property_info =
+          zend_get_property_info(desc->klass, &member, true TSRMLS_CC);
+#else
+      zend_string* member = zend_string_init(oneofname, strlen(oneofname), 1);
+      zend_property_info* property_info =
+          zend_get_property_info(desc->klass, member, true);
+      zend_string_release(member);
+#endif
+
+#if PHP_MAJOR_VERSION < 7 || (PHP_MAJOR_VERSION == 7 && PHP_MINOR_VERSION == 0)
+      EG(scope) = old_scope;
+#else
+      EG(fake_scope) = old_scope;
+#endif
+
+      layout->fields[upb_fielddef_index(field)].cache_index =
+          property_info->offset;
     }
     i++;
     off += field_size;
@@ -683,31 +744,20 @@ void free_layout(MessageLayout* layout) {
 }
 
 void layout_init(MessageLayout* layout, void* storage,
-                 CACHED_VALUE* properties_table PHP_PROTO_TSRMLS_DC) {
+                 zend_object* object PHP_PROTO_TSRMLS_DC) {
   int i;
   upb_msg_field_iter it;
+
+  // Init unknown fields
+  memset(storage, 0, sizeof(void*));
+
   for (upb_msg_field_begin(&it, layout->msgdef), i = 0; !upb_msg_field_done(&it);
        upb_msg_field_next(&it), i++) {
     const upb_fielddef* field = upb_msg_iter_field(&it);
     void* memory = slot_memory(layout, storage, field);
     uint32_t* oneof_case = slot_oneof_case(layout, storage, field);
     int cache_index = slot_property_cache(layout, storage, field);
-    CACHED_VALUE* property_ptr = &properties_table[cache_index];
-
-    // Clean up initial value by generated code. In the generated code of
-    // previous versions, each php field is given an initial value. However, the
-    // order to initialize these fields may not be consistent with the order of
-    // upb fields.
-    if (Z_TYPE_P(CACHED_PTR_TO_ZVAL_PTR(property_ptr)) == IS_STRING) {
-#if PHP_MAJOR_VERSION < 7
-      if (!IS_INTERNED(Z_STRVAL_PP(property_ptr))) {
-        FREE(Z_STRVAL_PP(property_ptr));
-      }
-#else
-      zend_string_release(Z_STR_P(property_ptr));
-#endif
-    }
-    ZVAL_NULL(CACHED_PTR_TO_ZVAL_PTR(property_ptr));
+    CACHED_VALUE* property_ptr = OBJ_PROP(object, cache_index);
 
     if (upb_fielddef_containingoneof(field)) {
       memset(memory, 0, NATIVE_SLOT_MAX_SIZE);
@@ -797,7 +847,7 @@ void layout_set(MessageLayout* layout, MessageHeader* header,
             header->descriptor->layout->fields[upb_fielddef_index(field)]
                 .cache_index;
         DEREF(memory, CACHED_VALUE*) =
-            &(header->std.properties_table)[property_cache_index];
+            OBJ_PROP(&header->std, property_cache_index);
         memory = DEREF(memory, CACHED_VALUE*);
         break;
       }
@@ -813,12 +863,41 @@ void layout_set(MessageLayout* layout, MessageHeader* header,
     zval* property_ptr = CACHED_PTR_TO_ZVAL_PTR((CACHED_VALUE*)memory);
 
     if (EXPECTED(property_ptr != val)) {
+      zend_class_entry *subce = NULL;
+      zval converted_value;
+
+      if (upb_fielddef_ismap(field)) {
+        const upb_msgdef* mapmsg = upb_fielddef_msgsubdef(field);
+        const upb_fielddef* keyfield = upb_msgdef_ntof(mapmsg, "key", 3);
+        const upb_fielddef* valuefield = upb_msgdef_ntof(mapmsg, "value", 5);
+        if (upb_fielddef_descriptortype(valuefield) ==
+            UPB_DESCRIPTOR_TYPE_MESSAGE) {
+          const upb_msgdef* submsg = upb_fielddef_msgsubdef(valuefield);
+          Descriptor* subdesc =
+              UNBOX_HASHTABLE_VALUE(Descriptor, get_def_obj(submsg));
+          subce = subdesc->klass;
+        }
+        check_map_field(subce, upb_fielddef_descriptortype(keyfield),
+                        upb_fielddef_descriptortype(valuefield), val,
+                        &converted_value);
+      } else {
+        if (upb_fielddef_type(field) == UPB_TYPE_MESSAGE) {
+          const upb_msgdef* submsg = upb_fielddef_msgsubdef(field);
+          Descriptor* subdesc =
+              UNBOX_HASHTABLE_VALUE(Descriptor, get_def_obj(submsg));
+          subce = subdesc->klass;
+        }
+
+        check_repeated_field(subce, upb_fielddef_descriptortype(field), val,
+                             &converted_value);
+      }
 #if PHP_MAJOR_VERSION < 7
-        REPLACE_ZVAL_VALUE((zval**)memory, val, 1);
+      REPLACE_ZVAL_VALUE((zval**)memory, &converted_value, 1);
 #else
-        php_proto_zval_ptr_dtor(property_ptr);
-        ZVAL_ZVAL(property_ptr, val, 1, 0);
+      php_proto_zval_ptr_dtor(property_ptr);
+      ZVAL_ZVAL(property_ptr, &converted_value, 1, 0);
 #endif
+      zval_dtor(&converted_value);
     }
   } else {
     upb_fieldtype_t type = upb_fielddef_type(field);
@@ -964,7 +1043,7 @@ void layout_merge(MessageLayout* layout, MessageHeader* from,
           int property_cache_index =
               layout->fields[upb_fielddef_index(field)].cache_index;
           DEREF(to_memory, CACHED_VALUE*) =
-              &(to->std.properties_table)[property_cache_index];
+              OBJ_PROP(&to->std, property_cache_index);
           break;
         }
         default:

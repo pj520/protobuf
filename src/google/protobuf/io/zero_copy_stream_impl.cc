@@ -43,9 +43,9 @@
 #include <algorithm>
 #include <google/protobuf/io/zero_copy_stream_impl.h>
 #include <google/protobuf/stubs/common.h>
-#include <google/protobuf/stubs/io_win32.h>
 #include <google/protobuf/stubs/logging.h>
 #include <google/protobuf/stubs/stl_util.h>
+#include <google/protobuf/stubs/io_win32.h>
 
 
 namespace google {
@@ -85,8 +85,6 @@ FileInputStream::FileInputStream(int file_descriptor, int block_size)
   : copying_input_(file_descriptor),
     impl_(&copying_input_, block_size) {
 }
-
-FileInputStream::~FileInputStream() {}
 
 bool FileInputStream::Close() {
   return copying_input_.Close();
@@ -278,8 +276,6 @@ bool FileOutputStream::CopyingFileOutputStream::Write(
 IstreamInputStream::IstreamInputStream(std::istream* input, int block_size)
     : copying_input_(input), impl_(&copying_input_, block_size) {}
 
-IstreamInputStream::~IstreamInputStream() {}
-
 bool IstreamInputStream::Next(const void** data, int* size) {
   return impl_.Next(data, size);
 }
@@ -351,9 +347,6 @@ bool OstreamOutputStream::CopyingOstreamOutputStream::Write(
 ConcatenatingInputStream::ConcatenatingInputStream(
     ZeroCopyInputStream* const streams[], int count)
   : streams_(streams), stream_count_(count), bytes_retired_(0) {
-}
-
-ConcatenatingInputStream::~ConcatenatingInputStream() {
 }
 
 bool ConcatenatingInputStream::Next(const void** data, int* size) {
